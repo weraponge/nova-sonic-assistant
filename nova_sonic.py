@@ -595,6 +595,7 @@ class AudioStreamer:
         if not self.is_streaming:
             return
             
+        print("Stopping audio streaming...")
         self.is_streaming = False
 
         # Cancel the tasks
@@ -612,20 +613,37 @@ class AudioStreamer:
             await asyncio.gather(*tasks, return_exceptions=True)
         
         # Stop and close the streams
-        if self.input_stream:
-            if self.input_stream.is_active():
-                self.input_stream.stop_stream()
-            self.input_stream.close()
+        try:
+            if self.input_stream:
+                if self.input_stream.is_active():
+                    self.input_stream.stop_stream()
+                self.input_stream.close()
+                self.input_stream = None
+        except Exception as e:
+            print(f"Error closing input stream: {str(e)}")
         
-        if self.output_stream:
-            if self.output_stream.is_active():
-                self.output_stream.stop_stream()
-            self.output_stream.close()
+        try:
+            if self.output_stream:
+                if self.output_stream.is_active():
+                    self.output_stream.stop_stream()
+                self.output_stream.close()
+                self.output_stream = None
+        except Exception as e:
+            print(f"Error closing output stream: {str(e)}")
         
-        if self.p:
-            self.p.terminate()
+        try:
+            if self.p:
+                self.p.terminate()
+                self.p = None
+        except Exception as e:
+            print(f"Error terminating PyAudio: {str(e)}")
         
-        await self.stream_manager.close() 
+        try:
+            await self.stream_manager.close()
+        except Exception as e:
+            print(f"Error closing stream manager: {str(e)}")
+            
+        print("Audio streaming stopped successfully")
 
 
 async def main(debug=False):

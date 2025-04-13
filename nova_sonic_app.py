@@ -37,6 +37,8 @@ if "event_loop" not in st.session_state:
     st.session_state.event_loop = None
 if "streaming_thread" not in st.session_state:
     st.session_state.streaming_thread = None
+if "stop_thread_flag" not in st.session_state:
+    st.session_state.stop_thread_flag = threading.Event()
 
 # Custom CSS for better UI
 st.markdown("""
@@ -216,24 +218,18 @@ with col2:
         if st.button("Stop Conversation", key="stop_button"):
             st.session_state.is_streaming = False
             
-            # Stop the streaming thread
-            if st.session_state.streaming_thread and st.session_state.streaming_thread.is_alive():
-                # Signal the thread to stop
-                if st.session_state.event_loop and st.session_state.audio_streamer:
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            st.session_state.audio_streamer.stop_streaming(),
-                            st.session_state.event_loop
-                        )
-                        # Wait for thread to finish
-                        st.session_state.streaming_thread.join(timeout=5)
-                    except Exception as e:
-                        st.error(f"Error stopping conversation: {str(e)}")
+            # Import and use the ThreadManager to properly clean up resources
+            from thread_manager import ThreadManager
             
-            st.session_state.stream_manager = None
-            st.session_state.audio_streamer = None
-            st.session_state.event_loop = None
-            st.session_state.streaming_thread = None
+            # Create a stop flag if it doesn't exist
+            if "stop_thread_flag" not in st.session_state:
+                st.session_state.stop_thread_flag = threading.Event()
+            
+            # Set the flag to signal the thread to stop
+            st.session_state.stop_thread_flag.set()
+            
+            # Ensure clean state will handle the thread termination
+            ThreadManager.ensure_clean_state(st.session_state)
             
             st.rerun()
     
@@ -275,7 +271,7 @@ class MessageCapture:
             safe_update_session_state('conversation_history', current_history)
 
 # Function to run the audio streaming in a separate thread
-def run_streaming(region, model_id, debug_mode):
+def run_streaming(region, model_id, debug_mode, voice_id):
     # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -298,7 +294,9 @@ def run_streaming(region, model_id, debug_mode):
         global DEBUG
         DEBUG = debug_mode
         
-        # Create stream manager
+        # Create stream manager with the current voice_id from the sidebar
+        # Ensure we're using the correct voice_id selected in the UI
+        print(f"Creating BedrockStreamManager with voice_id: {voice_id}")
         stream_manager = BedrockStreamManager(model_id=model_id, region=region, voice_id=voice_id)
         st.session_state.stream_manager = stream_manager
         
@@ -338,6 +336,16 @@ def run_streaming(region, model_id, debug_mode):
         try:
             # Start streaming
             loop.run_until_complete(audio_streamer.start_streaming())
+            
+            # Check for stop flag periodically
+            while not st.session_state.stop_thread_flag.is_set():
+                # Process events for a short time
+                loop.run_until_complete(asyncio.sleep(0.1))
+                
+            # If we get here, the stop flag was set
+            print("Stop flag detected, terminating streaming thread")
+            loop.run_until_complete(audio_streamer.stop_streaming())
+            
         except Exception as e:
             print(f"Error starting audio stream: {str(e)}")
             import traceback
@@ -363,26 +371,41 @@ def run_streaming(region, model_id, debug_mode):
         
         # Update streaming state
         st.session_state.is_streaming = False
+        
+        # Reset stop flag
+        st.session_state.stop_thread_flag.clear()
 
 # Start streaming if needed
 if st.session_state.is_streaming and not (st.session_state.streaming_thread and st.session_state.streaming_thread.is_alive()):
     try:
-        # Create and start the streaming thread
-        streaming_thread = threading.Thread(
-            target=run_streaming,
-            args=(region, model_id, debug_mode),
-            daemon=True
-        )
-        streaming_thread.start()
-        st.session_state.streaming_thread = streaming_thread
-        
-        # Give the thread a moment to initialize
-        time.sleep(0.5)
-        
-        # Check if thread is still alive
-        if not streaming_thread.is_alive():
-            st.error("Failed to start audio streaming. Check logs for details.")
-            st.session_state.is_streaming = False
+        # Check if we already have a thread that's still alive
+        if st.session_state.streaming_thread and st.session_state.streaming_thread.is_alive():
+            print("A streaming thread is already running. Not starting a new one.")
+        else:
+            # Make sure any previous resources are fully cleaned up
+            from thread_manager import ThreadManager
+            ThreadManager.ensure_clean_state(st.session_state)
+            
+            # Reset the stop flag before starting a new thread
+            st.session_state.stop_thread_flag.clear()
+            
+            # Create and start the streaming thread
+            print("Starting new streaming thread...")
+            streaming_thread = threading.Thread(
+                target=run_streaming,
+                args=(region, model_id, debug_mode, voice_id),  # Pass voice_id from the sidebar
+                daemon=True
+            )
+            streaming_thread.start()
+            st.session_state.streaming_thread = streaming_thread
+            
+            # Give the thread a moment to initialize
+            time.sleep(0.5)
+            
+            # Check if thread is still alive
+            if not streaming_thread.is_alive():
+                st.error("Failed to start audio streaming. Check logs for details.")
+                st.session_state.is_streaming = False
     except Exception as e:
         st.error(f"Error starting conversation: {str(e)}")
         st.session_state.is_streaming = False
